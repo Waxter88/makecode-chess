@@ -1,25 +1,30 @@
 /**
- * Refactored Chess Game using Microsoft MakeCode Arcade
+ * Chess Game using Microsoft MakeCode Arcade - Refactored and Optimized
  *
  * Features:
  * - Consistent, easy-to-read color scheme (white border, pastel blue squares).
  * - Move history with B button to undo the last move.
- * - Improved AI: chooses the highest-value capture if available (using a consistent board snapshot).
- * - Hover text shows the piece type over a cell (using a 60px–wide image to avoid cutting off longer text)
- *   and is immediately removed when the cursor moves.
- * - Custom centered messages appear over the board.
- * 
+ * - Improved AI: chooses the highest-value capture if available.
+ * - Hover text shows the piece type over a cell.
+ * - Custom centered messages over the board.
+ *
  * TODO: 
- * - Add a timer for each player. Customizable time limits.
- * - Better AI logic for non-capturing moves. And better overall strategy.
- * 
+ * - Add a timer for each player.
+ * - Improve AI logic for non-capturing moves.
+ * - Fix King movement logic (currently making illegal moves).
+ * - Enhance the game over menu.
  */
 
 // ===========================
-// === Constants & Globals ===
+// === Constants & Enums   ===
 // ===========================
+const BOARD_SIZE = 8;
+const SQUARE_SIZE = 14;
+const BOARD_OFFSET_X = 24;
+const BOARD_OFFSET_Y = 4;
+const MAX_STACK = 3; // Max stack for piece capture sprites on status bar
+const YIELD_THRESHOLD = 10; // Yield every 10 nodes evaluated
 
-// Map colors to their numbers
 enum Color {
     Transparent = 0,
     White = 1,
@@ -64,6 +69,9 @@ enum GameState {
     GameOver
 }
 
+// ===========================
+// === Global Variables    ===
+// ===========================
 class Piece {
     type: PieceType;
     color: PieceColor;
@@ -76,7 +84,6 @@ class Piece {
     }
 }
 
-// Move history record for undo functionality
 interface MoveRecord {
     fromRow: number;
     fromCol: number;
@@ -102,49 +109,44 @@ interface MoveRecord {
     };
     oldEnPassantTarget: { row: number, col: number } | null;
 }
+
 let moveHistory: MoveRecord[] = [];
-
-// Board configuration
-let squareSize = 14;
-let boardOffsetX = 24;
-let boardOffsetY = 4;
 let board: (Piece | null)[][] = [];
-
-// En passant tracking
 let enPassantTarget: { row: number, col: number } | null = null;
 
-// Cursor & turn tracking
 let cursorRow = 0;
 let cursorCol = 0;
 let selectedPiece: { row: number, col: number } | null = null;
 let currentTurn: PieceColor = PieceColor.White;
 
-// Game state
 let gameOver = false;
-let gameType = GameType.TwoPlayer;
+let gameType: GameType = GameType.TwoPlayer;
 let gameState: GameState = GameState.MainMenu;
-let menuSelection = 0;  // 0: 2-Player, 1: AI Mode
-let aiThinking = false;
+let menuSelection = 0;
+let gameOverMenuSprite: Sprite = null;
 
-// Score tracking – piece values: Pawn=1, Knight/Bishop=3, Rook=5, Queen=9.
+// AI variables
+let aiThinking = false;
+let aiSearchDepth = 3;
+let aiProgress = 0; // percentage for AI thinking progress
+let nodesEvaluated = 0; // for progress bar
+let estimatedTotalNodes = 1000;  // A starting guess; you can update this after each move.
+let yieldCounter = 0;
+let lastAIMove: { fromRow: number, fromCol: number, toRow: number, toCol: number } | null = null;
+
 let whiteScore = 0;
 let blackScore = 0;
 
-// Status indicators – vertical 20x16 images placed at the far left and right.
 let leftStatusSprite: Sprite;
 let rightStatusSprite: Sprite;
-// AI indicator (shown while AI computes)
 let aiIndicatorSprite: Sprite = null;
-// Global variable for active custom message so it can be cleared on cursor move.
 let activeMessage: Sprite = null;
-// Hover piece indicator (displayed over a cell)
 let hoverSprite: Sprite = null;
-// Highlighted squares for legal moves
 let moveHighlights: Sprite[] = [];
 
-// ==========================
-// === Sprite Kinds       ===
-// ==========================
+// ===========================
+// === Sprite Kinds        ===
+// ===========================
 namespace SpriteKind {
     export const Piece = SpriteKind.create();
     export const Cursor = SpriteKind.create();
@@ -154,11 +156,27 @@ namespace SpriteKind {
     export const Hover = SpriteKind.create();
 }
 
-// =========================
-// === Piece Graphics UI ===
-// =========================
+// ===========================
+// === Utility Functions   ===
+// ===========================
 
-// Global piece images (swapped so that White pieces appear bright)
+/** Returns the center position for a board cell */
+function getCellPosition(row: number, col: number): { x: number, y: number } {
+    const x = BOARD_OFFSET_X + col * SQUARE_SIZE + Math.idiv(SQUARE_SIZE, 2);
+    const y = BOARD_OFFSET_Y + row * SQUARE_SIZE + Math.idiv(SQUARE_SIZE, 2);
+    return { x, y };
+}
+
+/** Helper to print centered text on an image */
+function printCenter(img: Image, text: string, y: number, color: number = 0, font: image.Font = image.font5) {
+    const textWidth = text.length * 6;
+    const xOffset = Math.idiv(img.width - textWidth, 2);
+    img.print(text, xOffset, y, color, font);
+}
+
+// ===========================
+// === Piece Graphics      ===
+// ===========================
 let wPawnImg: Image;
 let bPawnImg: Image;
 let wRookImg: Image;
@@ -171,123 +189,91 @@ let wQueenImg: Image;
 let bQueenImg: Image;
 let wKingImg: Image;
 let bKingImg: Image;
-
-// Cursor sprite for board play
 let cursorSprite: Sprite;
 
 function loadPieceImages() {
-    let center = Math.idiv(squareSize, 2);
+    let center = Math.idiv(SQUARE_SIZE, 2);
     let radius = center - 2;
-    // --- Pawn ---
-    wPawnImg = image.create(squareSize, squareSize);
+    // Pawn
+    wPawnImg = image.create(SQUARE_SIZE, SQUARE_SIZE);
     wPawnImg.fill(0);
     wPawnImg.fillCircle(center, center, radius, 15);
     wPawnImg.drawCircle(center, center, radius, 0);
-    bPawnImg = image.create(squareSize, squareSize);
+    bPawnImg = image.create(SQUARE_SIZE, SQUARE_SIZE);
     bPawnImg.fill(0);
     bPawnImg.fillCircle(center, center, radius, 1);
     bPawnImg.drawCircle(center, center, radius, 0);
-    // --- Rook ---
-    wRookImg = image.create(squareSize, squareSize);
+    // Rook
+    wRookImg = image.create(SQUARE_SIZE, SQUARE_SIZE);
     wRookImg.fill(0);
-    wRookImg.fillRect(2, 4, squareSize - 4, squareSize - 6, 15);
-    wRookImg.drawRect(2, 4, squareSize - 4, squareSize - 6, 0);
-    wRookImg.fillRect(4, 2, squareSize - 8, 4, 15);
-    wRookImg.drawRect(4, 2, squareSize - 8, 4, 0);
-    bRookImg = image.create(squareSize, squareSize);
+    wRookImg.fillRect(2, 4, SQUARE_SIZE - 4, SQUARE_SIZE - 6, 15);
+    wRookImg.drawRect(2, 4, SQUARE_SIZE - 4, SQUARE_SIZE - 6, 0);
+    wRookImg.fillRect(4, 2, SQUARE_SIZE - 8, 4, 15);
+    wRookImg.drawRect(4, 2, SQUARE_SIZE - 8, 4, 0);
+    bRookImg = image.create(SQUARE_SIZE, SQUARE_SIZE);
     bRookImg.fill(0);
-    bRookImg.fillRect(2, 4, squareSize - 4, squareSize - 6, 1);
-    bRookImg.drawRect(2, 4, squareSize - 4, squareSize - 6, 0);
-    bRookImg.fillRect(4, 2, squareSize - 8, 4, 1);
-    bRookImg.drawRect(4, 2, squareSize - 8, 4, 0);
-    // --- Knight ---
-    wKnightImg = image.create(squareSize, squareSize);
+    bRookImg.fillRect(2, 4, SQUARE_SIZE - 4, SQUARE_SIZE - 6, 1);
+    bRookImg.drawRect(2, 4, SQUARE_SIZE - 4, SQUARE_SIZE - 6, 0);
+    bRookImg.fillRect(4, 2, SQUARE_SIZE - 8, 4, 1);
+    bRookImg.drawRect(4, 2, SQUARE_SIZE - 8, 4, 0);
+    // Knight
+    wKnightImg = image.create(SQUARE_SIZE, SQUARE_SIZE);
     wKnightImg.fill(0);
-    wKnightImg.fillRect(2, 2, squareSize - 4, squareSize - 4, 15);
-    wKnightImg.drawLine(2, squareSize - 3, squareSize - 3, 2, 0);
-    wKnightImg.drawLine(2, squareSize - 5, squareSize - 5, 2, 0);
-    bKnightImg = image.create(squareSize, squareSize);
+    wKnightImg.fillRect(2, 2, SQUARE_SIZE - 4, SQUARE_SIZE - 4, 15);
+    wKnightImg.drawLine(2, SQUARE_SIZE - 3, SQUARE_SIZE - 3, 2, 0);
+    wKnightImg.drawLine(2, SQUARE_SIZE - 5, SQUARE_SIZE - 5, 2, 0);
+    bKnightImg = image.create(SQUARE_SIZE, SQUARE_SIZE);
     bKnightImg.fill(0);
-    bKnightImg.fillRect(2, 2, squareSize - 4, squareSize - 4, 1);
-    bKnightImg.drawLine(2, squareSize - 3, squareSize - 3, 2, 0);
-    bKnightImg.drawLine(2, squareSize - 5, squareSize - 5, 2, 0);
-    // --- Bishop ---
-    wBishopImg = image.create(squareSize, squareSize);
+    bKnightImg.fillRect(2, 2, SQUARE_SIZE - 4, SQUARE_SIZE - 4, 1);
+    bKnightImg.drawLine(2, SQUARE_SIZE - 3, SQUARE_SIZE - 3, 2, 0);
+    bKnightImg.drawLine(2, SQUARE_SIZE - 5, SQUARE_SIZE - 5, 2, 0);
+    // Bishop
+    wBishopImg = image.create(SQUARE_SIZE, SQUARE_SIZE);
     wBishopImg.fill(0);
-    wBishopImg.fillRect(2, 2, squareSize - 4, squareSize - 4, 15);
-    wBishopImg.drawLine(2, 2, squareSize - 3, squareSize - 3, 0);
-    wBishopImg.drawLine(squareSize - 3, 2, 2, squareSize - 3, 0);
+    wBishopImg.fillRect(2, 2, SQUARE_SIZE - 4, SQUARE_SIZE - 4, 15);
+    wBishopImg.drawLine(2, 2, SQUARE_SIZE - 3, SQUARE_SIZE - 3, 0);
+    wBishopImg.drawLine(SQUARE_SIZE - 3, 2, 2, SQUARE_SIZE - 3, 0);
     wBishopImg.setPixel(center, center, 0);
-    bBishopImg = image.create(squareSize, squareSize);
+    bBishopImg = image.create(SQUARE_SIZE, SQUARE_SIZE);
     bBishopImg.fill(0);
-    bBishopImg.fillRect(2, 2, squareSize - 4, squareSize - 4, 1);
-    bBishopImg.drawLine(2, 2, squareSize - 3, squareSize - 3, 0);
-    bBishopImg.drawLine(squareSize - 3, 2, 2, squareSize - 3, 0);
+    bBishopImg.fillRect(2, 2, SQUARE_SIZE - 4, SQUARE_SIZE - 4, 1);
+    bBishopImg.drawLine(2, 2, SQUARE_SIZE - 3, SQUARE_SIZE - 3, 0);
+    bBishopImg.drawLine(SQUARE_SIZE - 3, 2, 2, SQUARE_SIZE - 3, 0);
     bBishopImg.setPixel(center, center, 0);
-    // --- Queen ---
-    wQueenImg = image.create(squareSize, squareSize);
+    // Queen
+    wQueenImg = image.create(SQUARE_SIZE, SQUARE_SIZE);
     wQueenImg.fill(0);
     wQueenImg.fillCircle(center, center, radius, 15);
     wQueenImg.drawCircle(center, center, radius, 0);
-    wQueenImg.drawLine(center, 2, center, squareSize - 3, 0);
-    wQueenImg.drawLine(2, center, squareSize - 3, center, 0);
-    bQueenImg = image.create(squareSize, squareSize);
+    wQueenImg.drawLine(center, 2, center, SQUARE_SIZE - 3, 0);
+    wQueenImg.drawLine(2, center, SQUARE_SIZE - 3, center, 0);
+    bQueenImg = image.create(SQUARE_SIZE, SQUARE_SIZE);
     bQueenImg.fill(0);
     bQueenImg.fillCircle(center, center, radius, 1);
     bQueenImg.drawCircle(center, center, radius, 0);
-    bQueenImg.drawLine(center, 2, center, squareSize - 3, 0);
-    bQueenImg.drawLine(2, center, squareSize - 3, center, 0);
-    // --- King ---
-    wKingImg = image.create(squareSize, squareSize);
+    bQueenImg.drawLine(center, 2, center, SQUARE_SIZE - 3, 0);
+    bQueenImg.drawLine(2, center, SQUARE_SIZE - 3, center, 0);
+    // King
+    wKingImg = image.create(SQUARE_SIZE, SQUARE_SIZE);
     wKingImg.fill(0);
-    wKingImg.fillRect(2, 2, squareSize - 4, squareSize - 4, 15);
-    wKingImg.drawRect(2, 2, squareSize - 4, squareSize - 4, 0);
-    wKingImg.drawLine(center, 2, center, squareSize - 3, 0);
-    wKingImg.drawLine(2, center, squareSize - 3, center, 0);
+    wKingImg.fillRect(2, 2, SQUARE_SIZE - 4, SQUARE_SIZE - 4, 15);
+    wKingImg.drawRect(2, 2, SQUARE_SIZE - 4, SQUARE_SIZE - 4, 0);
+    wKingImg.drawLine(center, 2, center, SQUARE_SIZE - 3, 0);
+    wKingImg.drawLine(2, center, SQUARE_SIZE - 3, center, 0);
     wKingImg.fillRect(center - 2, 0, 5, 2, 15);
     wKingImg.drawRect(center - 2, 0, 5, 2, 0);
-    bKingImg = image.create(squareSize, squareSize);
+    bKingImg = image.create(SQUARE_SIZE, SQUARE_SIZE);
     bKingImg.fill(0);
-    bKingImg.fillRect(2, 2, squareSize - 4, squareSize - 4, 1);
-    bKingImg.drawRect(2, 2, squareSize - 4, squareSize - 4, 0);
-    bKingImg.drawLine(center, 2, center, squareSize - 3, 0);
-    bKingImg.drawLine(2, center, squareSize - 3, center, 0);
+    bKingImg.fillRect(2, 2, SQUARE_SIZE - 4, SQUARE_SIZE - 4, 1);
+    bKingImg.drawRect(2, 2, SQUARE_SIZE - 4, SQUARE_SIZE - 4, 0);
+    bKingImg.drawLine(center, 2, center, SQUARE_SIZE - 3, 0);
+    bKingImg.drawLine(2, center, SQUARE_SIZE - 3, center, 0);
     bKingImg.fillRect(center - 2, 0, 5, 2, 1);
     bKingImg.drawRect(center - 2, 0, 5, 2, 0);
 }
 
-// Move Highlighting
-function clearMoveHighlights() {
-    for (let highlight of moveHighlights) {
-        highlight.destroy();
-    }
-    moveHighlights = [];
-}
-
-function showMoveHighlights(row: number, col: number) {
-    clearMoveHighlights();
-    let piece = board[row][col];
-    if (!piece) return;
-
-    for (let r = 0; r < 8; r++) {
-        for (let c = 0; c < 8; c++) {
-            if (isLegalMove(row, col, r, c)) {
-                let highlight = sprites.create(image.create(squareSize, squareSize), SpriteKind.Hover);
-                //highlight.image.fill(2); // Light color for move highlights
-                highlight.image.drawRect(0, 0, squareSize, squareSize, 3);
-                highlight.setFlag(SpriteFlag.Ghost, true);
-                highlight.setPosition(
-                    boardOffsetX + c * squareSize + Math.idiv(squareSize, 2),
-                    boardOffsetY + r * squareSize + Math.idiv(squareSize, 2)
-                );
-                moveHighlights.push(highlight);
-            }
-        }
-    }
-}
-
+/** Returns the appropriate image for a piece */
 function getPieceImage(piece: Piece): Image {
-    // Swap images: White pieces use the bright image (originally built for Black)
     if (piece.color == PieceColor.White) {
         switch (piece.type) {
             case PieceType.Pawn: return bPawnImg;
@@ -307,7 +293,7 @@ function getPieceImage(piece: Piece): Image {
             case PieceType.King: return wKingImg;
         }
     }
-    return image.create(squareSize, squareSize);
+    return image.create(SQUARE_SIZE, SQUARE_SIZE);
 }
 
 function pieceTypeName(type: PieceType): string {
@@ -321,7 +307,7 @@ function pieceTypeName(type: PieceType): string {
     }
 }
 
-// Return piece value (for scoring)
+// Returns piece value for scoring
 function pieceValue(piece: Piece): number {
     switch (piece.type) {
         case PieceType.Pawn: return 1;
@@ -333,33 +319,26 @@ function pieceValue(piece: Piece): number {
     }
 }
 
-// =============================
-// === Game Initialization   ===
-// =============================
-
+// ===========================
+// === Game Initialization ===
+// ===========================
 function createPiece(type: PieceType, color: PieceColor, row: number, col: number): Piece {
     let piece = new Piece(type, color);
     piece.sprite = sprites.create(getPieceImage(piece), SpriteKind.Piece);
-    piece.sprite.setPosition(
-        boardOffsetX + col * squareSize + Math.idiv(squareSize, 2),
-        boardOffsetY + row * squareSize + Math.idiv(squareSize, 2)
-    );
+    let pos = getCellPosition(row, col);
+    piece.sprite.setPosition(pos.x, pos.y);
     return piece;
 }
 
 function drawBoardBackground() {
     let bg = image.create(160, 120);
-    // White border with alternating pastel blue squares.
-    bg.fill(6); // Color of the background
-    for (let row = 0; row < 8; row++) {
-        for (let col = 0; col < 8; col++) {
-            let x = boardOffsetX + col * squareSize;
-            let y = boardOffsetY + row * squareSize;
-            if ((row + col) % 2 == 0) {
-                bg.fillRect(x, y, squareSize, squareSize, 12);
-            } else {
-                bg.fillRect(x, y, squareSize, squareSize, 11);
-            }
+    bg.fill(6); // Background color
+    for (let row = 0; row < BOARD_SIZE; row++) {
+        for (let col = 0; col < BOARD_SIZE; col++) {
+            let x = BOARD_OFFSET_X + col * SQUARE_SIZE;
+            let y = BOARD_OFFSET_Y + row * SQUARE_SIZE;
+            let colorFill = ((row + col) % 2 == 0) ? 12 : 11;
+            bg.fillRect(x, y, SQUARE_SIZE, SQUARE_SIZE, colorFill);
         }
     }
     scene.setBackgroundImage(bg);
@@ -367,51 +346,50 @@ function drawBoardBackground() {
 
 function initBoard() {
     board = [];
-    for (let row = 0; row < 8; row++) {
+    for (let row = 0; row < BOARD_SIZE; row++) {
         let rowArray: (Piece | null)[] = [];
-        for (let col = 0; col < 8; col++) {
+        for (let col = 0; col < BOARD_SIZE; col++) {
             rowArray.push(null);
         }
         board.push(rowArray);
     }
     enPassantTarget = null;
-    // Place pawns
-    for (let col = 0; col < 8; col++) {
+    // Place Pawns
+    for (let col = 0; col < BOARD_SIZE; col++) {
         board[1][col] = createPiece(PieceType.Pawn, PieceColor.Black, 1, col);
         board[6][col] = createPiece(PieceType.Pawn, PieceColor.White, 6, col);
     }
-    // Place rooks
+    // Place Rooks
     board[0][0] = createPiece(PieceType.Rook, PieceColor.Black, 0, 0);
     board[0][7] = createPiece(PieceType.Rook, PieceColor.Black, 0, 7);
     board[7][0] = createPiece(PieceType.Rook, PieceColor.White, 7, 0);
     board[7][7] = createPiece(PieceType.Rook, PieceColor.White, 7, 7);
-    // Place knights
+    // Place Knights
     board[0][1] = createPiece(PieceType.Knight, PieceColor.Black, 0, 1);
     board[0][6] = createPiece(PieceType.Knight, PieceColor.Black, 0, 6);
     board[7][1] = createPiece(PieceType.Knight, PieceColor.White, 7, 1);
     board[7][6] = createPiece(PieceType.Knight, PieceColor.White, 7, 6);
-    // Place bishops
+    // Place Bishops
     board[0][2] = createPiece(PieceType.Bishop, PieceColor.Black, 0, 2);
     board[0][5] = createPiece(PieceType.Bishop, PieceColor.Black, 0, 5);
     board[7][2] = createPiece(PieceType.Bishop, PieceColor.White, 7, 2);
     board[7][5] = createPiece(PieceType.Bishop, PieceColor.White, 7, 5);
-    // Place queens
+    // Place Queens
     board[0][3] = createPiece(PieceType.Queen, PieceColor.Black, 0, 3);
     board[7][3] = createPiece(PieceType.Queen, PieceColor.White, 7, 3);
-    // Place kings
+    // Place Kings
     board[0][4] = createPiece(PieceType.King, PieceColor.Black, 0, 4);
     board[7][4] = createPiece(PieceType.King, PieceColor.White, 7, 4);
 }
 
-// =============================
-// === Rule Enforcement     ===
-// =============================
-
+// ===========================
+// === Rule Enforcement    ===
+// ===========================
 function cloneBoard(b: (Piece | null)[][]): (Piece | null)[][] {
     let newBoard: (Piece | null)[][] = [];
-    for (let row = 0; row < 8; row++) {
+    for (let row = 0; row < BOARD_SIZE; row++) {
         let newRow: (Piece | null)[] = [];
-        for (let col = 0; col < 8; col++) {
+        for (let col = 0; col < BOARD_SIZE; col++) {
             let p = b[row][col];
             if (p) {
                 let newPiece = new Piece(p.type, p.color);
@@ -427,8 +405,8 @@ function cloneBoard(b: (Piece | null)[][]): (Piece | null)[][] {
 }
 
 function isSquareAttacked(row: number, col: number, byColor: PieceColor, b: (Piece | null)[][]): boolean {
-    for (let r = 0; r < 8; r++) {
-        for (let c = 0; c < 8; c++) {
+    for (let r = 0; r < BOARD_SIZE; r++) {
+        for (let c = 0; c < BOARD_SIZE; c++) {
             let p = b[r][c];
             if (p != null && p.color == byColor) {
                 if (p.type == PieceType.Pawn) {
@@ -454,9 +432,7 @@ function canPieceAttack(fromRow: number, fromCol: number, toRow: number, toCol: 
     switch (piece.type) {
         case PieceType.Pawn:
             let direction = piece.color == PieceColor.White ? -1 : 1;
-            if (Math.abs(toCol - fromCol) == 1 && toRow == fromRow + direction) {
-                legal = true;
-            }
+            legal = (Math.abs(toCol - fromCol) == 1 && toRow == fromRow + direction);
             break;
         case PieceType.Rook:
             legal = isLegalRookMove(fromRow, fromCol, toRow, toCol);
@@ -479,8 +455,8 @@ function canPieceAttack(fromRow: number, fromCol: number, toRow: number, toCol: 
 }
 
 function findKing(color: PieceColor, b: (Piece | null)[][]): { row: number, col: number } | null {
-    for (let r = 0; r < 8; r++) {
-        for (let c = 0; c < 8; c++) {
+    for (let r = 0; r < BOARD_SIZE; r++) {
+        for (let c = 0; c < BOARD_SIZE; c++) {
             let p = b[r][c];
             if (p != null && p.color == color && p.type == PieceType.King) {
                 return { row: r, col: c };
@@ -493,7 +469,8 @@ function findKing(color: PieceColor, b: (Piece | null)[][]): { row: number, col:
 function isKingInCheck(color: PieceColor, b: (Piece | null)[][]): boolean {
     let kingPos = findKing(color, b);
     if (kingPos == null) return true;
-    return isSquareAttacked(kingPos.row, kingPos.col, color == PieceColor.White ? PieceColor.Black : PieceColor.White, b);
+    let enemyColor = (color == PieceColor.White) ? PieceColor.Black : PieceColor.White;
+    return isSquareAttacked(kingPos.row, kingPos.col, enemyColor, b);
 }
 
 function isLegalMoveSimulated(fromRow: number, fromCol: number, toRow: number, toCol: number): boolean {
@@ -502,7 +479,8 @@ function isLegalMoveSimulated(fromRow: number, fromCol: number, toRow: number, t
     if (!isLegalMoveBasic(fromRow, fromCol, toRow, toCol, piece)) return false;
     let simBoard = cloneBoard(board);
     let simPiece = simBoard[fromRow][fromCol];
-    if (simPiece == null) return false;
+    if (!simPiece) return false;
+    // Handle en passant capture
     if (simPiece.type == PieceType.Pawn && Math.abs(toCol - fromCol) == 1 && simBoard[toRow][toCol] == null) {
         simBoard[fromRow][toCol] = null;
     } else {
@@ -510,11 +488,12 @@ function isLegalMoveSimulated(fromRow: number, fromCol: number, toRow: number, t
     }
     simBoard[toRow][toCol] = simPiece;
     simBoard[fromRow][fromCol] = null;
+    // Handle castling
     if (simPiece.type == PieceType.King && Math.abs(toCol - fromCol) == 2) {
         if (toCol > fromCol) {
-            let rook = simBoard[fromRow][7];
+            let rook = simBoard[fromRow][BOARD_SIZE - 1];
             simBoard[fromRow][fromCol + 1] = rook;
-            simBoard[fromRow][7] = null;
+            simBoard[fromRow][BOARD_SIZE - 1] = null;
         } else {
             let rook = simBoard[fromRow][0];
             simBoard[fromRow][fromCol - 1] = rook;
@@ -543,10 +522,28 @@ function isLegalMoveBasic(fromRow: number, fromCol: number, toRow: number, toCol
             return isLegalQueenMove(fromRow, fromCol, toRow, toCol);
         case PieceType.King:
             if (Math.abs(toCol - fromCol) == 2 && toRow == fromRow) {
+                // Castling: ensure the king isn't currently in check,
+                // the intermediate squares are not attacked and are empty,
+                // and the appropriate rook exists and hasn't moved.
                 if (isKingInCheck(piece.color, board)) return false;
+                let enemyColor = (piece.color == PieceColor.White) ? PieceColor.Black : PieceColor.White;
                 let step = toCol > fromCol ? 1 : -1;
-                if (isSquareAttacked(fromRow, fromCol + step, piece.color == PieceColor.White ? PieceColor.Black : PieceColor.White, board)) return false;
-                if (isSquareAttacked(toRow, toCol, piece.color == PieceColor.White ? PieceColor.Black : PieceColor.White, board)) return false;
+                if (isSquareAttacked(fromRow, fromCol + step, enemyColor, board)) return false;
+                if (isSquareAttacked(toRow, toCol, enemyColor, board)) return false;
+                // Check that all squares between king and destination are empty.
+                if (toCol > fromCol) {
+                    for (let c = fromCol + 1; c <= toCol; c++) {
+                        if (board[fromRow][c] != null) return false;
+                    }
+                    let rook = board[fromRow][BOARD_SIZE - 1];
+                    if (!rook || rook.hasMoved) return false;
+                } else {
+                    for (let c = toCol; c < fromCol; c++) {
+                        if (board[fromRow][c] != null) return false;
+                    }
+                    let rook = board[fromRow][0];
+                    if (!rook || rook.hasMoved) return false;
+                }
                 return true;
             } else {
                 return isLegalKingMove(fromRow, fromCol, toRow, toCol);
@@ -557,26 +554,28 @@ function isLegalMoveBasic(fromRow: number, fromCol: number, toRow: number, toCol
 
 function isLegalMove(fromRow: number, fromCol: number, toRow: number, toCol: number): boolean {
     let piece = board[fromRow][fromCol];
-    if (piece == null) return false;
-    if (toRow < 0 || toRow >= 8 || toCol < 0 || toCol >= 8) return false;
+    if (!piece) return false;
+    if (toRow < 0 || toRow >= BOARD_SIZE || toCol < 0 || toCol >= BOARD_SIZE) return false;
     let dest = board[toRow][toCol];
     if (dest != null && dest.color == piece.color) return false;
     return isLegalMoveSimulated(fromRow, fromCol, toRow, toCol);
 }
 
-// ============================
-// === Piece Movement Logic ===
-// ============================
-
+// ===========================
+// === Movement Logic      ===
+// ===========================
 function isLegalPawnMove(fromRow: number, fromCol: number, toRow: number, toCol: number, piece: Piece): boolean {
     let direction = piece.color == PieceColor.White ? -1 : 1;
+    // Single move forward
     if (toCol == fromCol && toRow == fromRow + direction && board[toRow][toCol] == null) {
         return true;
     }
+    // Double move from starting position
     if (toCol == fromCol && !piece.hasMoved && toRow == fromRow + 2 * direction &&
         board[fromRow + direction][fromCol] == null && board[toRow][toCol] == null) {
         return true;
     }
+    // Capturing move
     if (Math.abs(toCol - fromCol) == 1 && toRow == fromRow + direction) {
         if (board[toRow][toCol] != null && board[toRow][toCol].color != piece.color) {
             return true;
@@ -588,12 +587,12 @@ function isLegalPawnMove(fromRow: number, fromCol: number, toRow: number, toCol:
 function isLegalRookMove(fromRow: number, fromCol: number, toRow: number, toCol: number): boolean {
     if (fromRow != toRow && fromCol != toCol) return false;
     if (fromRow == toRow) {
-        let step = toCol > fromCol ? 1 : -1;
+        let step = (toCol > fromCol) ? 1 : -1;
         for (let c = fromCol + step; c != toCol; c += step) {
             if (board[fromRow][c] != null) return false;
         }
     } else {
-        let step = toRow > fromRow ? 1 : -1;
+        let step = (toRow > fromRow) ? 1 : -1;
         for (let r = fromRow + step; r != toRow; r += step) {
             if (board[r][fromCol] != null) return false;
         }
@@ -614,13 +613,15 @@ function isLegalBishopMove(fromRow: number, fromCol: number, toRow: number, toCo
     let r = fromRow + stepRow;
     let c = fromCol + stepCol;
     while (r != toRow) {
-        if (r < 0 || r >= 8 || c < 0 || c >= 8) return false;
+        // Ensure indices are within board bounds
+        if (r < 0 || r >= BOARD_SIZE || c < 0 || c >= BOARD_SIZE) return false;
         if (board[r][c] != null) return false;
         r += stepRow;
         c += stepCol;
     }
     return true;
 }
+
 
 function isLegalQueenMove(fromRow: number, fromCol: number, toRow: number, toCol: number): boolean {
     return isLegalRookMove(fromRow, fromCol, toRow, toCol) ||
@@ -635,12 +636,9 @@ function isLegalKingMove(fromRow: number, fromCol: number, toRow: number, toCol:
 
 function movePiece(fromRow: number, fromCol: number, toRow: number, toCol: number) {
     let piece = board[fromRow][fromCol];
-    if (piece == null) return;
+    if (!piece) return;
     let moveRecord: MoveRecord = {
-        fromRow: fromRow,
-        fromCol: fromCol,
-        toRow: toRow,
-        toCol: toCol,
+        fromRow, fromCol, toRow, toCol,
         piece: {
             piece: piece,
             oldType: piece.type,
@@ -648,6 +646,8 @@ function movePiece(fromRow: number, fromCol: number, toRow: number, toCol: numbe
         },
         oldEnPassantTarget: enPassantTarget ? { row: enPassantTarget.row, col: enPassantTarget.col } : null
     };
+
+    // En passant capture
     if (piece.type == PieceType.Pawn && Math.abs(toCol - fromCol) == 1 &&
         board[toRow][toCol] == null && enPassantTarget &&
         enPassantTarget.row == toRow && enPassantTarget.col == toCol) {
@@ -664,6 +664,8 @@ function movePiece(fromRow: number, fromCol: number, toRow: number, toCol: numbe
             board[fromRow][toCol] = null;
         }
     }
+
+    // Capture move
     let destPiece = board[toRow][toCol];
     if (destPiece != null) {
         moveRecord.captured = {
@@ -673,35 +675,29 @@ function movePiece(fromRow: number, fromCol: number, toRow: number, toCol: numbe
             row: toRow,
             col: toCol
         };
-
-        // Increase the score for the capturing player
         let capturedValue = pieceValue(destPiece);
         if (piece.color == PieceColor.White) {
             whiteScore += capturedValue;
         } else {
             blackScore += capturedValue;
         }
-
-        // Update the UI after the capture
         updateStatusUI();
         destPiece.sprite.destroy();
     }
 
+    // Castling move
     if (piece.type == PieceType.King && Math.abs(toCol - fromCol) == 2) {
         if (toCol > fromCol) {
-            let rook = board[fromRow][7];
+            let rook = board[fromRow][BOARD_SIZE - 1];
             if (rook) {
                 moveRecord.castling = {
-                    rookFrom: 7,
+                    rookFrom: BOARD_SIZE - 1,
                     rookTo: fromCol + 1,
                     rook: rook,
                     oldHasMoved: rook.hasMoved
                 };
-                rook.sprite.setPosition(
-                    boardOffsetX + (fromCol + 1) * squareSize + Math.idiv(squareSize, 2),
-                    boardOffsetY + fromRow * squareSize + Math.idiv(squareSize, 2)
-                );
-                board[fromRow][7] = null;
+                rook.sprite.setPosition(getCellPosition(fromRow, fromCol + 1).x, getCellPosition(fromRow, fromCol + 1).y);
+                board[fromRow][BOARD_SIZE - 1] = null;
                 board[fromRow][fromCol + 1] = rook;
             }
         } else {
@@ -713,30 +709,30 @@ function movePiece(fromRow: number, fromCol: number, toRow: number, toCol: numbe
                     rook: rook,
                     oldHasMoved: rook.hasMoved
                 };
-                rook.sprite.setPosition(
-                    boardOffsetX + (fromCol - 1) * squareSize + Math.idiv(squareSize, 2),
-                    boardOffsetY + fromRow * squareSize + Math.idiv(squareSize, 2)
-                );
+                rook.sprite.setPosition(getCellPosition(fromRow, fromCol - 1).x, getCellPosition(fromRow, fromCol - 1).y);
                 board[fromRow][0] = null;
                 board[fromRow][fromCol - 1] = rook;
             }
         }
     }
+
     moveHistory.push(moveRecord);
     board[toRow][toCol] = piece;
     board[fromRow][fromCol] = null;
     piece.hasMoved = true;
-    piece.sprite.setPosition(
-        boardOffsetX + toCol * squareSize + Math.idiv(squareSize, 2),
-        boardOffsetY + toRow * squareSize + Math.idiv(squareSize, 2)
-    );
+    let newPos = getCellPosition(toRow, toCol);
+    piece.sprite.setPosition(newPos.x, newPos.y);
+
+    // Pawn promotion
     if (piece.type == PieceType.Pawn) {
         if ((piece.color == PieceColor.White && toRow == 0) ||
-            (piece.color == PieceColor.Black && toRow == 7)) {
+            (piece.color == PieceColor.Black && toRow == BOARD_SIZE - 1)) {
             piece.type = PieceType.Queen;
             piece.sprite.setImage(getPieceImage(piece));
         }
     }
+
+    // Update en passant target
     if (piece.type == PieceType.Pawn && Math.abs(toRow - fromRow) == 2) {
         enPassantTarget = { row: fromRow + (toRow - fromRow) / 2, col: fromCol };
     } else {
@@ -745,27 +741,23 @@ function movePiece(fromRow: number, fromCol: number, toRow: number, toCol: numbe
     updateGameStatus();
 }
 
-// ==========================
-// === Undo Move Function ===
-// ==========================
+// ===========================
+// === Undo Move Function  ===
+// ===========================
 function undoLastMove() {
-    if (gameState == GameState.MainMenu) return;
-    if (gameState == GameState.GameOver) return;
+    if (gameState == GameState.MainMenu || gameState == GameState.GameOver) return;
     if (moveHistory.length == 0) {
         displayCustomText("No moves to undo");
         return;
     }
-
     let move = moveHistory.pop();
     if (!move) return;
     let movedPiece = board[move.toRow][move.toCol];
     if (movedPiece) {
         movedPiece.type = move.piece.oldType;
         movedPiece.hasMoved = move.piece.oldHasMoved;
-        movedPiece.sprite.setPosition(
-            boardOffsetX + move.fromCol * squareSize + Math.idiv(squareSize, 2),
-            boardOffsetY + move.fromRow * squareSize + Math.idiv(squareSize, 2)
-        );
+        let pos = getCellPosition(move.fromRow, move.fromCol);
+        movedPiece.sprite.setPosition(pos.x, pos.y);
         board[move.fromRow][move.fromCol] = movedPiece;
         board[move.toRow][move.toCol] = null;
     }
@@ -774,7 +766,6 @@ function undoLastMove() {
         let restored = createPiece(cap.type, cap.color, cap.row, cap.col);
         restored.hasMoved = cap.hasMoved;
         board[cap.row][cap.col] = restored;
-        // Decrease the score for the capturing player
         let capturedValue = pieceValue(restored);
         if (restored.color == PieceColor.White) {
             blackScore -= capturedValue;
@@ -787,63 +778,50 @@ function undoLastMove() {
         let cast = move.castling;
         let rook = cast.rook;
         rook.hasMoved = cast.oldHasMoved;
-        rook.sprite.setPosition(
-            boardOffsetX + cast.rookFrom * squareSize + Math.idiv(squareSize, 2),
-            boardOffsetY + move.fromRow * squareSize + Math.idiv(squareSize, 2)
-        );
+        rook.sprite.setPosition(getCellPosition(move.fromRow, cast.rookFrom).x, getCellPosition(move.fromRow, cast.rookFrom).y);
         board[move.fromRow][cast.rookFrom] = rook;
         board[move.fromRow][cast.rookTo] = null;
     }
     enPassantTarget = move.oldEnPassantTarget;
-    currentTurn = currentTurn == PieceColor.White ? PieceColor.Black : PieceColor.White;
+    currentTurn = (currentTurn == PieceColor.White) ? PieceColor.Black : PieceColor.White;
     displayCustomText("Undo move");
 }
 
-// ==========================
-// === Game Status        ===
-// ==========================
+// ===========================
+// === Game Status & Checks ===
+// ===========================
 function hasAnyLegalMove(color: PieceColor): boolean {
-    let legalMovesFound = false;
-    for (let r = 0; r < 8; r++) {
-        for (let c = 0; c < 8; c++) {
+    for (let r = 0; r < BOARD_SIZE; r++) {
+        for (let c = 0; c < BOARD_SIZE; c++) {
             let p = board[r][c];
             if (p != null && p.color == color) {
-                for (let r2 = 0; r2 < 8; r2++) {
-                    for (let c2 = 0; c2 < 8; c2++) {
+                for (let r2 = 0; r2 < BOARD_SIZE; r2++) {
+                    for (let c2 = 0; c2 < BOARD_SIZE; c2++) {
                         if (isLegalMove(r, c, r2, c2)) {
-                            console.log(`Legal move for ${pieceTypeName(p.type)} from (${r}, ${c}) to (${r2}, ${c2})`);
-                            legalMovesFound = true;
+                            return true;
                         }
                     }
                 }
             }
         }
     }
-    return legalMovesFound;
+    return false;
 }
 
 function updateGameStatus() {
     console.log("Current Turn: " + (currentTurn == PieceColor.White ? "White" : "Black"));
     if (gameOver) return;
-    
-    // Check if current player is in check
     let inCheck = isKingInCheck(currentTurn, board);
     if (inCheck) {
         displayCustomText("Check!");
     }
-    
-    // Check if current player has any legal moves
     if (!hasAnyLegalMove(currentTurn)) {
         if (inCheck) {
-            // Checkmate - king is in check and no legal moves
-            let winner = currentTurn === PieceColor.White ? "Black" : "White";
+            let winner = (currentTurn === PieceColor.White) ? "Black" : "White";
             displayCustomText(`Checkmate! ${winner} wins!`);
-            
-            // Determine win/lose from White player's perspective for consistency with AI mode
-            let result: "win" | "lose" | "tie" = currentTurn === PieceColor.White ? "lose" : "win";
+            let result: "win" | "lose" | "tie" = (currentTurn === PieceColor.White) ? "lose" : "win";
             createGameOverMenu(result);
         } else {
-            // Stalemate - not in check but no legal moves
             displayCustomText("Stalemate! Game ends in a draw.");
             createGameOverMenu("tie");
         }
@@ -852,9 +830,9 @@ function updateGameStatus() {
     }
 }
 
-// ==========================
+// ===========================
 // === Custom Text Display ===
-// ==========================
+// ===========================
 function displayCustomText(msg: string, duration: number = 2000) {
     let img = image.create(160, 20);
     let textWidth = msg.length * 6;
@@ -876,162 +854,139 @@ function displayCustomText(msg: string, duration: number = 2000) {
     });
 }
 
-// ==========================
-// === UI & Status Bar    ===
-// ==========================
+// ===========================
+// === UI & Status Bar     ===
+// ===========================
 function createStatusUI() {
     let leftImg = image.create(20, 16);
     leftImg.fill(15);
     leftImg.print("W", 4, 0, 0);
-    leftImg.print("" + whiteScore, 4, 8, 0);
+    leftImg.print(whiteScore.toString(), 4, 8, 0);
     leftStatusSprite = sprites.create(leftImg, SpriteKind.Status);
     leftStatusSprite.setFlag(SpriteFlag.Ghost, true);
-    leftStatusSprite.setPosition(10, boardOffsetY + 6);
+    leftStatusSprite.setPosition(10, BOARD_OFFSET_Y + 6);
 
     let rightImg = image.create(20, 16);
     rightImg.fill(15);
     rightImg.print("B", 4, 0, 0);
-    rightImg.print("" + blackScore, 4, 8, 0);
+    rightImg.print(blackScore.toString(), 4, 8, 0);
     rightStatusSprite = sprites.create(rightImg, SpriteKind.Status);
     rightStatusSprite.setFlag(SpriteFlag.Ghost, true);
-    rightStatusSprite.setPosition(150, boardOffsetY + 6);
+    rightStatusSprite.setPosition(150, BOARD_OFFSET_Y + 6);
 }
 
 function updateStatusUI() {
-    // 1) Collect captured pieces
-    let capturedWhitePieces: PieceType[] = [];
-    let capturedBlackPieces: PieceType[] = [];
-
-    for (let i = 0; i < moveHistory.length; i++) {
-        let move = moveHistory[i];
-        if (move.captured) {
-            if (move.captured.color == PieceColor.White) {
-                capturedWhitePieces.push(move.captured.type);
-            } else {
-                capturedBlackPieces.push(move.captured.type);
-            }
-        }
-    }
-
-    // 2) Group them by piece type
+    // Group captured pieces by type
     function groupByType(pieces: PieceType[]): { [pt: number]: number } {
         let groups: { [pt: number]: number } = {};
-        for (let i = 0; i < pieces.length; i++) {
-            let pt = pieces[i];
-            if (!groups[pt]) {
-                groups[pt] = 0;
-            }
-            groups[pt]++;
+        for (let pt of pieces) {
+            groups[pt] = (groups[pt] || 0) + 1;
         }
         return groups;
     }
+    // Updated captured pieces collection in updateStatusUI
+    let capturedWhitePieces: PieceType[] = []; // will hold captured black pieces (captured by White)
+    let capturedBlackPieces: PieceType[] = []; // will hold captured white pieces (captured by Black)
+    for (let i = 0; i < moveHistory.length; i++) {
+        let move = moveHistory[i];
+        if (move.captured) {
+            if (move.captured.color == PieceColor.Black) {
+                // White piece captured – add to Black’s captured list (right panel)
+                capturedBlackPieces.push(move.captured.type);
+            } else {
+                // Black piece captured – add to White’s captured list (left panel)
+                capturedWhitePieces.push(move.captured.type);
+            }
+        }
+    }
 
-    let blackGroups = groupByType(capturedBlackPieces); // black pieces captured by White
-    let whiteGroups = groupByType(capturedWhitePieces); // white pieces captured by Black
+    let whiteGroups = groupByType(capturedBlackPieces);
+    let blackGroups = groupByType(capturedWhitePieces);
+    let panelWidth = 60, panelHeight = 80;
+    let allPieceTypes = [PieceType.Pawn, PieceType.Rook, PieceType.Knight, PieceType.Bishop, PieceType.Queen, PieceType.King];
 
-    // 3) Panel setup
-    let panelWidth = 60;
-    let panelHeight = 80;
-
-    // 4) List of all piece types in numeric order
-    let allPieceTypes = [
-        PieceType.Pawn,
-        PieceType.Rook,
-        PieceType.Knight,
-        PieceType.Bishop,
-        PieceType.Queen,
-        PieceType.King
-    ];
-
-    // 5) LEFT PANEL: White’s score + black pieces captured
+    // Left panel: White's score and captured Black pieces
     let leftImg = image.create(panelWidth, panelHeight);
     leftImg.fill(0);
-
-    // Score at the top
     leftImg.print("W", 4, 0, 1);
-    leftImg.print("" + whiteScore, 4, 8, 1);
-
+    leftImg.print(whiteScore.toString(), 12, 0, 1);
     let leftYOffset = 16;
-
-    for (let i = 0; i < allPieceTypes.length; i++) {
-        let pType = allPieceTypes[i];
-        let count = blackGroups[pType] ? blackGroups[pType] : 0;
+    for (let pType of allPieceTypes) {
+        let count = whiteGroups[pType] || 0;
         if (count > 0) {
             let mini = getPieceImage(new Piece(pType, PieceColor.Black));
-
-            // Overlap horizontally by some small offset (e.g., 4px)
-            // so if count>1, you see multiple stacked
-            let overlapX = 4; // adjust this to change overlap (larger = more overlap)
-
-            // Draw each captured piece slightly offset
-            for (let c = 0; c < count; c++) {
+            let overlapX = 4;
+            let stackCount = Math.min(count, MAX_STACK)
+            for (let c = 0; c < stackCount; c++) {
                 let xPos = 2 + c * overlapX;
                 leftImg.drawTransparentImage(mini, xPos, leftYOffset);
             }
-
-            // If more than 1 was captured, display a "×N" label
             if (count > 1) {
-                // Center the label on top of the group of pieces
-                let groupCenter = 2 + (count - 1) * overlapX + Math.idiv(mini.width, 2);
-                let labelX = groupCenter - Math.idiv(("x" + count).length * 6, 2); // Adjust the multiplier if needed based on font size
+                let labelWidth = ("x" + count).length * 6;
+                let labelX = Math.idiv(panelWidth - labelWidth, 2) - 24;
                 leftImg.print("x" + count, labelX, leftYOffset, Color.Red, image.font5);
-            }
 
-            // Move down one row for the next piece type
+            }
             leftYOffset += mini.height + 2;
         }
     }
-
     leftStatusSprite.setImage(leftImg);
 
-    // 6) RIGHT PANEL: Black’s score + white pieces captured
+    // Right panel: Black's score and captured White pieces
     let rightImg = image.create(panelWidth, panelHeight);
     rightImg.fill(0);
-
-    // Score at the top
     rightImg.print("B", 4, 0, 1);
-    rightImg.print("" + blackScore, 4, 8, 1);
-
+    rightImg.print(blackScore.toString(), 12, 0, 1);
     let rightYOffset = 16;
-
-    for (let i = 0; i < allPieceTypes.length; i++) {
-        let pType = allPieceTypes[i];
-        let count = whiteGroups[pType] ? whiteGroups[pType] : 0;
+    for (let pType of allPieceTypes) {
+        let count = blackGroups[pType] || 0;
         if (count > 0) {
             let mini = getPieceImage(new Piece(pType, PieceColor.White));
-            let overlapX = 4; // adjust for how much you want them to overlap
-
-            for (let c = 0; c < count; c++) {
+            let overlapX = 4;
+            let stackCount = Math.min(count, MAX_STACK);
+            for (let c = 0; c < stackCount; c++) {
                 let xPos = 2 + c * overlapX;
                 rightImg.drawTransparentImage(mini, xPos, rightYOffset);
             }
-
             if (count > 1) {
-                // Center the label on top of the group of pieces
-                let groupCenter = 2 + (count - 1) * overlapX + Math.idiv(mini.width, 2);
-                let labelX = groupCenter - Math.idiv(("x" + count).length * 6, 2); // Adjust the multiplier if needed based on font size
+                let labelWidth = ("x" + count).length * 6;
+                let labelX = Math.idiv(panelWidth - labelWidth, 2) - 24;
                 rightImg.print("x" + count, labelX, rightYOffset, Color.Red, image.font5);
             }
-
             rightYOffset += mini.height + 2;
         }
     }
-
     rightStatusSprite.setImage(rightImg);
 }
 
-
 function showAIIndicator() {
-    if (aiIndicatorSprite) {
-        aiIndicatorSprite.destroy();
-    }
-    let img = image.create(80, 10);
-    let text = "AI Thinking...";
-    let offset = Math.floor((img.width - text.length * 6) / 2);
-    img.print(text, offset, 0, 0);
-    aiIndicatorSprite = sprites.create(img, SpriteKind.AIIndicator);
+    // Reset our counters
+    nodesEvaluated = 0;
+    // (Optionally, you might reset estimatedTotalNodes here or keep the previous estimate.)
+    let indicatorImg = image.create(100, 20);
+    indicatorImg.fill(15);
+    indicatorImg.drawRect(0, 10, 100, 10, Color.Black);
+    indicatorImg.print("AI Thinking...", 6, 0, Color.Orange, image.font5);
+    aiIndicatorSprite = sprites.create(indicatorImg, SpriteKind.AIIndicator);
     aiIndicatorSprite.setFlag(SpriteFlag.Ghost, true);
     aiIndicatorSprite.setPosition(80, 20);
+    aiIndicatorSprite.z = 150;
+    control.runInParallel(function () {
+        while (aiThinking) {
+            // Calculate progress as ratio of nodesEvaluated to estimatedTotalNodes.
+            let progressRatio = Math.min(nodesEvaluated / estimatedTotalNodes, 1);
+            let fillWidth = Math.idiv(progressRatio * 98, 1);
+            let img = image.create(100, 20);
+            img.fill(15);
+            img.drawRect(0, 10, 100, 10, Color.Black);
+            img.fillRect(1, 11, fillWidth, 8, Color.Orange);
+            img.print("AI Thinking...", 2, 0, Color.Orange, image.font5);
+            if (aiIndicatorSprite) {
+                aiIndicatorSprite.setImage(img);
+            }
+            pause(100);
+        }
+    });
 }
 
 function hideAIIndicator() {
@@ -1041,52 +996,45 @@ function hideAIIndicator() {
     }
 }
 
-// ==========================
+// ===========================
 // === Hover Piece Display ===
-// ==========================
-game.onUpdateInterval(200, function () {
-    // Update Status UI
+// ===========================
+game.onUpdateInterval(50, function () {
     if (gameState == GameState.Playing) {
         updateStatusUI();
     }
-    // If a piece is selected, clear hover text.
     if (gameState == GameState.Playing && selectedPiece == null) {
         let piece = board[cursorRow][cursorCol];
         if (piece != null) {
             let msg = (piece.color == PieceColor.White ? "W " : "B ") + pieceTypeName(piece.type);
-            // Create a wider image (60 pixels) for hover text.
             let img = image.create(60, 10);
             img.fill(15);
             let offset = Math.floor((img.width - msg.length * 6) / 2);
             img.print(msg, offset, 0, 6, image.font5);
-
-
             if (hoverSprite == null) {
                 hoverSprite = sprites.create(img, SpriteKind.Hover);
             } else {
                 hoverSprite.setImage(img);
             }
-            hoverSprite.setPosition(
-                boardOffsetX + cursorCol * squareSize + Math.idiv(squareSize, 2),
-                boardOffsetY + cursorRow * squareSize + Math.idiv(squareSize, 2) - 8
-            );
+            let pos = getCellPosition(cursorRow, cursorCol);
+            hoverSprite.setPosition(pos.x, pos.y - 8);
         } else {
-            if (hoverSprite != null) {
+            if (hoverSprite) {
                 hoverSprite.destroy();
                 hoverSprite = null;
             }
         }
     } else {
-        if (hoverSprite != null) {
+        if (hoverSprite) {
             hoverSprite.destroy();
             hoverSprite = null;
         }
     }
 });
 
-// ==========================
-// === Cursor & Menu UI   ===
-// ==========================
+// ===========================
+// === Cursor & Menu UI    ===
+// ===========================
 function createCursor(color: number = 5) {
     cursorSprite = sprites.create(createCursorImage(color), SpriteKind.Cursor);
     cursorSprite.setFlag(SpriteFlag.Ghost, true);
@@ -1095,29 +1043,41 @@ function createCursor(color: number = 5) {
 }
 
 function createCursorImage(color: number = 5): Image {
-    let imgCursor = image.create(squareSize, squareSize);
-    imgCursor.drawRect(0, 0, squareSize, squareSize, color);
+    let imgCursor = image.create(SQUARE_SIZE, SQUARE_SIZE);
+    imgCursor.drawRect(0, 0, SQUARE_SIZE, SQUARE_SIZE, color);
     return imgCursor;
 }
 
 function updateCursorSprite() {
-    cursorSprite.setPosition(
-        boardOffsetX + cursorCol * squareSize + Math.idiv(squareSize, 2),
-        boardOffsetY + cursorRow * squareSize + Math.idiv(squareSize, 2)
-    );
+    let pos = getCellPosition(cursorRow, cursorCol);
+    cursorSprite.setPosition(pos.x, pos.y);
 }
 
 function updateMenuDisplay() {
     let menu = image.create(160, 120);
-    menu.fill(15);
-    menu.printCenter("Chess", 10, 0, image.font8);
+    menu.fill(15); // Black background
+
+    // Title area
+    printCenter(menu, "CHESS", 5, Color.White, image.font8);
+    menu.drawLine(0, 20, 160, 20, Color.White);
+
+    // Options area
     if (menuSelection == 0) {
-        menu.print("-> 2-Player", 20, 50, 0);
-        menu.print("   AI Mode", 20, 70, 0);
+        menu.print("-> 2-Player", 10, 30, Color.White, image.font8);
+        menu.print("   AI Mode", 10, 40, Color.White, image.font8);
     } else {
-        menu.print("   2-Player", 20, 50, 0);
-        menu.print("-> AI Mode", 20, 70, 0);
+        menu.print("   2-Player", 10, 30, Color.White, image.font8);
+        menu.print("-> AI Mode", 10, 40, Color.White, image.font8);
+        // Show current depth and a brief two-line description:
+        menu.print("Depth: " + aiSearchDepth, 10, 50, Color.Orange, image.font8);
+        printCenter(menu, "Higher depth", 60, Color.Orange, image.font8);
+        printCenter(menu, "= stronger AI", 70, Color.Orange, image.font8);
+        printCenter(menu, "Menu: Change AI Depth", 85, Color.White, image.font8);
     }
+
+    // Instructions area (centered)
+    printCenter(menu, "Arrows: Move   A: Confirm", 100, Color.White, image.font8);
+
     scene.setBackgroundImage(menu);
 }
 
@@ -1127,141 +1087,184 @@ function createMainMenu() {
 }
 
 function createGameOverMenu(result: "win" | "lose" | "tie") {
-    
     gameState = GameState.GameOver;
-    
-    // 1) Draw the background image
-    let img = image.create(120, 100);
-    img.fill(Color.Transparent);  // fill with a background color (white / light gray)
-
-    // 2) Print outcome text at the top
+    // Create a smaller overlay image so the board remains visible behind it.
+    let menuImg = image.create(120, 100);
+    // Fill with transparent color
+    menuImg.fill(Color.Transparent);
+    // Optionally, draw a border for emphasis
+    menuImg.drawRect(0, 0, menuImg.width, menuImg.height, Color.Black);
     if (result === "win") {
-        img.printCenter("You Win!", 10, Color.Green, image.font8);
+        printCenter(menuImg, "You Win!", 10, Color.Green, image.font8);
     } else if (result === "lose") {
-        img.printCenter("You Lose!", 10, Color.Red, image.font8);
-    } else if (result === "tie") {
-        img.printCenter("Tie Game!", 10, Color.Yellow, image.font8);
+        printCenter(menuImg, "You Lose!", 10, Color.Red, image.font8);
+    } else {
+        printCenter(menuImg, "Tie Game!", 10, Color.Yellow, image.font8);
     }
+    printCenter(menuImg, "Press A: Main Menu", 50, Color.Blue, image.font8);
+    printCenter(menuImg, "Press B: Restart", 70, Color.Blue, image.font8);
 
-    // 3) Print instructions for Main Menu (A) and Restart (B)
-    img.printCenter("Press A:", 50, 0, image.font8);
-    img.printCenter("Main Menu", 60, 0, image.font8);
-    
-    img.printCenter("Press B:", 80, 0, image.font8);
-    img.printCenter("Restart", 90, 0, image.font8);
-
-    // 4) Show this image as the background
-    scene.setBackgroundImage(img);
-
-    // 5) Listen for button presses
-    //    These actions only work when on the Game Over screen
-    controller.A.onEvent(ControllerButtonEvent.Pressed, function() {
-        if (gameState == GameState.GameOver) {
-            // Go back to main menu
-            createMainMenu(); 
-        }
-    });
-
-    controller.B.onEvent(ControllerButtonEvent.Pressed, function() {
-        if (gameState == GameState.GameOver) {
-            // Restart the game
-            newGame();
-        }
-    });
+    // Create an overlay sprite with high z-index so it appears on top
+    gameOverMenuSprite = sprites.create(menuImg, SpriteKind.Message);
+    gameOverMenuSprite.setFlag(SpriteFlag.Ghost, true);
+    gameOverMenuSprite.setPosition(80, 60);
+    gameOverMenuSprite.z = 200;
 }
 
 
-// ==========================
-// === Basic AI Mode      ===
-// ==========================
-function aiMove() {
-    if (aiThinking) return;
-    aiThinking = true;
-    showAIIndicator();
-    control.runInParallel(function () {
-        // Clone the board to get a consistent snapshot.
-        let backup = cloneBoard(board);
-        let savedBoard = board;
-        board = backup;
-        let moves: { fromRow: number, fromCol: number, toRow: number, toCol: number }[] = [];
-        let captureMoves: { fromRow: number, fromCol: number, toRow: number, toCol: number }[] = [];
-        console.log("AI scanning for moves...");
-        for (let r = 0; r < 8; r++) {
-            for (let c = 0; c < 8; c++) {
-                let piece = board[r][c];
-                if (piece != null && piece.color == PieceColor.Black) {
-                    console.log("Evaluating piece at (" + r + "," + c + "): " + pieceTypeName(piece.type));
-                    for (let r2 = 0; r2 < 8; r2++) {
-                        for (let c2 = 0; c2 < 8; c2++) {
-                            if (isLegalMove(r, c, r2, c2)) {
-                                let moveDescription = "Found legal move for " + pieceTypeName(piece.type) + " from (" + r + "," + c + ") to (" + r2 + "," + c2 + ")";
-                                if (board[r2][c2] != null) {
-                                    moveDescription += " capturing " + pieceTypeName(board[r2][c2].type);
-                                }
-                                console.log(moveDescription);
-                                moves.push({ fromRow: r, fromCol: c, toRow: r2, toCol: c2 });
-                                if (board[r2][c2] != null) {
-                                    captureMoves.push({ fromRow: r, fromCol: c, toRow: r2, toCol: c2 });
-                                }
-                            }
+// ===========================
+// === Basic AI Mode       ===
+// ===========================
+// -------------------------
+// Helper: Evaluate board for a given board state.
+// add a bonus for forcing checkmate
+function evaluateBoardForBoard(b: (Piece | null)[][]): number {
+    let score = 0;
+    for (let r = 0; r < BOARD_SIZE; r++) {
+        for (let c = 0; c < BOARD_SIZE; c++) {
+            let piece = b[r][c];
+            if (piece != null) {
+                let val = pieceValue(piece);
+                // Positive for Black pieces, negative for White.
+                score += (piece.color == PieceColor.Black) ? val : -val;
+            }
+        }
+    }
+    // Add bonus if White's king (enemy) is in check.
+    if (isKingInCheck(PieceColor.White, b)) {
+        score += 50; // Adjust bonus as needed.
+    }
+    return score;
+}
+
+// -------------------------
+// Helper: Check legal move on a given board (using global isLegalMove)
+function isLegalMoveForBoard(b: (Piece | null)[][], fromRow: number, fromCol: number, toRow: number, toCol: number): boolean {
+    let oldBoard = board;
+    board = b;
+    let legal = isLegalMove(fromRow, fromCol, toRow, toCol);
+    board = oldBoard;
+    return legal;
+}
+
+// -------------------------
+// Helper: Get all legal moves for a given board and color.
+function getAllLegalMoves(b: (Piece | null)[][], color: PieceColor): { fromRow: number, fromCol: number, toRow: number, toCol: number }[] {
+    let moves: { fromRow: number, fromCol: number, toRow: number, toCol: number }[] = [];
+    for (let r = 0; r < BOARD_SIZE; r++) {
+        for (let c = 0; c < BOARD_SIZE; c++) {
+            let piece = b[r][c];
+            if (piece != null && piece.color == color) {
+                for (let r2 = 0; r2 < BOARD_SIZE; r2++) {
+                    for (let c2 = 0; c2 < BOARD_SIZE; c2++) {
+                        if (isLegalMoveForBoard(b, r, c, r2, c2)) {
+                            moves.push({ fromRow: r, fromCol: c, toRow: r2, toCol: c2 });
                         }
                     }
                 }
             }
         }
-        board = savedBoard; // Restore global board
+    }
+    return moves;
+}
 
-        let chosenMove: { fromRow: number, fromCol: number, toRow: number, toCol: number } | null = null;
-        if (captureMoves.length > 0) {
-            let bestValue = -1;
-            let bestMoves: { fromRow: number, fromCol: number, toRow: number, toCol: number }[] = [];
-            for (let m of captureMoves) {
-                let target = board[m.toRow][m.toCol];
-                if (target == null) continue;
-                let val = pieceValue(target);
-                if (val > bestValue) {
-                    bestValue = val;
-                    bestMoves = [m];
-                } else if (val == bestValue) {
-                    bestMoves.push(m);
-                }
+// -------------------------
+// Minimax algorithm with alpha-beta pruning.
+// Minimax algorithm with alpha-beta pruning, with repetition penalty.
+function minimax(b: (Piece | null)[][], depth: number, maximizingPlayer: boolean, alpha: number, beta: number): { score: number, move?: { fromRow: number, fromCol: number, toRow: number, toCol: number } } {
+    nodesEvaluated++;
+    yieldCounter++;
+    if (yieldCounter >= YIELD_THRESHOLD) {
+        pause(1);
+        yieldCounter = 0;
+    }
+    let color = maximizingPlayer ? PieceColor.Black : PieceColor.White;
+    let moves = getAllLegalMoves(b, color);
+    if (depth == 0 || moves.length == 0) {
+        return { score: evaluateBoardForBoard(b) };
+    }
+    let bestMove: { fromRow: number, fromCol: number, toRow: number, toCol: number } | undefined = undefined;
+    if (maximizingPlayer) {
+        let maxEval = -10000;
+        for (let m of moves) {
+            let penalty = 0;
+            // If this move undoes the last AI move, add a penalty.
+            if (lastAIMove != null &&
+                m.fromRow == lastAIMove.toRow && m.fromCol == lastAIMove.toCol &&
+                m.toRow == lastAIMove.fromRow && m.toCol == lastAIMove.fromCol) {
+                penalty = 20; // Adjust penalty as needed.
             }
-            chosenMove = bestMoves[Math.randomRange(0, bestMoves.length - 1)];
-        } else if (moves.length > 0) {
-            chosenMove = moves[Math.randomRange(0, moves.length - 1)];
+            let cloneB = cloneBoard(b);
+            simulateMove(cloneB, m.fromRow, m.fromCol, m.toRow, m.toCol);
+            let evalResult = minimax(cloneB, depth - 1, false, alpha, beta);
+            let score = evalResult.score - penalty;
+            if (score > maxEval) {
+                maxEval = score;
+                bestMove = m;
+            }
+            alpha = Math.max(alpha, score);
+            if (beta <= alpha) break;
         }
-        if (chosenMove) {
-            console.log("AI executing move: from (" + chosenMove.fromRow + "," + chosenMove.fromCol + ") to (" + chosenMove.toRow + "," + chosenMove.toCol + ")");
-            let movingPiece = board[chosenMove.fromRow][chosenMove.fromCol];
-            if (movingPiece) {
-                console.log("Moving piece: " + pieceTypeName(movingPiece.type));
+        return { score: maxEval, move: bestMove };
+    } else {
+        let minEval = 10000;
+        for (let m of moves) {
+            let cloneB = cloneBoard(b);
+            simulateMove(cloneB, m.fromRow, m.fromCol, m.toRow, m.toCol);
+            let evalResult = minimax(cloneB, depth - 1, true, alpha, beta);
+            if (evalResult.score < minEval) {
+                minEval = evalResult.score;
+                bestMove = m;
             }
-            movePiece(chosenMove.fromRow, chosenMove.fromCol, chosenMove.toRow, chosenMove.toCol);
+            beta = Math.min(beta, evalResult.score);
+            if (beta <= alpha) break;
+        }
+        return { score: minEval, move: bestMove };
+    }
+}
+
+// -------------------------
+// Update simulateMove if needed (does not handle castling/en passant)
+function simulateMove(b: (Piece | null)[][], fromRow: number, fromCol: number, toRow: number, toCol: number): void {
+    let piece = b[fromRow][fromCol];
+    if (!piece) return;
+    b[toRow][toCol] = piece;
+    b[fromRow][fromCol] = null;
+}
+
+// -------------------------
+// Improved AI: Use minimax to pick the best move.
+function aiMove() {
+    if (aiThinking) return;
+    aiThinking = true;
+    showAIIndicator();
+    control.runInParallel(function () {
+        let searchDepth = aiSearchDepth;
+        let startTime = control.millis();
+        let result = minimax(board, searchDepth, true, -10000, 10000);
+        let elapsed = control.millis() - startTime;
+        estimatedTotalNodes = nodesEvaluated;
+        if (result.move) {
+            movePiece(result.move.fromRow, result.move.fromCol, result.move.toRow, result.move.toCol);
             currentTurn = PieceColor.White;
-            console.log("AI moved from " + chosenMove.fromRow + "," + chosenMove.fromCol + " to " + chosenMove.toRow + "," + chosenMove.toCol);
+            // Update lastAIMove to avoid repeated moves.
+            lastAIMove = result.move;
         } else {
             gameOver = true;
             gameState = GameState.GameOver;
-
             if (isKingInCheck(PieceColor.Black, board)) {
-                console.log("AI is in check and has no legal moves!");
                 displayCustomText("AI is in checkmate!");
                 createGameOverMenu("win");
-                
             } else {
-                console.log("AI has no legal moves! - But is not in check, so stalemate.");
-                createGameOverMenu("tie");
                 displayCustomText("AI has no legal moves!");
+                createGameOverMenu("tie");
             }
-            
             return;
         }
         updateGameStatus();
         hideAIIndicator();
-        // Indicate where the AI moved
-        cursorRow = chosenMove.toRow;
-        cursorCol = chosenMove.toCol;
-
+        cursorRow = result.move.toRow;
+        cursorCol = result.move.toCol;
         updateCursorSprite();
         aiThinking = false;
     });
@@ -1274,22 +1277,20 @@ game.onUpdate(function () {
     }
 });
 
-// ==========================
-// === Input Handling     ===
-// ==========================
+// ===========================
+// === Input Handling      ===
+// ===========================
 controller.A.onEvent(ControllerButtonEvent.Pressed, function () {
     if (activeMessage) {
         activeMessage.destroy();
         activeMessage = null;
     }
-    if (gameState == GameState.MainMenu) {
-        if (menuSelection == 0) {
-            gameType = GameType.TwoPlayer;
-            displayCustomText("2-Player Mode");
-        } else {
-            gameType = GameType.AI;
-            displayCustomText("AI Mode");
-        }
+    if (gameState == GameState.GameOver && gameOverMenuSprite) {
+        gameOverMenuSprite.destroy();
+        createMainMenu();
+    } else if (gameState == GameState.MainMenu) {
+        gameType = (menuSelection == 0) ? GameType.TwoPlayer : GameType.AI;
+        displayCustomText(gameType == GameType.TwoPlayer ? "2-Player Mode" : "AI Mode");
         createCursor();
         loadPieceImages();
         drawBoardBackground();
@@ -1299,25 +1300,27 @@ controller.A.onEvent(ControllerButtonEvent.Pressed, function () {
         gameState = GameState.Playing;
     } else if (gameState == GameState.Playing) {
         if (gameOver) return;
-        if (selectedPiece == null) {
+        if (!selectedPiece) {
             let piece = board[cursorRow][cursorCol];
             if (piece != null && piece.color == currentTurn) {
                 selectedPiece = { row: cursorRow, col: cursorCol };
                 displayCustomText("Selected " + pieceTypeName(piece.type));
-                //change cursor color
                 cursorSprite.setImage(createCursorImage(4));
                 showMoveHighlights(cursorRow, cursorCol);
             }
         } else {
             let fromRow = selectedPiece.row;
             let fromCol = selectedPiece.col;
-            if (isLegalMove(fromRow, fromCol, cursorRow, cursorCol)) {
-                // debug print show legal move and type of piece
+            // If the player clicked on the same square again, consider it a deselection.
+            if (fromRow == cursorRow && fromCol == cursorCol) {
+                let piece = board[fromRow][fromCol];
+                displayCustomText(pieceTypeName(piece.type) + " deselected");
+            } else if (isLegalMove(fromRow, fromCol, cursorRow, cursorCol)) {
                 let piece = board[fromRow][fromCol];
                 console.log("Legal move for " + pieceTypeName(piece.type) + " from (" + fromRow + "," + fromCol + ") to (" + cursorRow + "," + cursorCol + ")");
                 movePiece(fromRow, fromCol, cursorRow, cursorCol);
-                currentTurn = currentTurn == PieceColor.White ? PieceColor.Black : PieceColor.White;
-
+                currentTurn = (currentTurn == PieceColor.White) ? PieceColor.Black : PieceColor.White;
+                updateGameStatus();
             } else {
                 displayCustomText("Illegal Move!");
             }
@@ -1328,14 +1331,17 @@ controller.A.onEvent(ControllerButtonEvent.Pressed, function () {
     }
 });
 
-
 controller.B.onEvent(ControllerButtonEvent.Pressed, function () {
-    undoLastMove();
-        // if the last move was by the AI then undo twice
-        if (GameType.AI) {
+    if (gameState == GameState.GameOver && gameOverMenuSprite) {
+        gameOverMenuSprite.destroy();
+        newGame();
+    } else if (gameState == GameState.Playing) {
+        undoLastMove();
+        // If playing against AI, undo twice (to undo both moves)
+        if (gameType == GameType.AI) {
             undoLastMove();
-            return;
         }
+    }
 });
 
 controller.left.onEvent(ControllerButtonEvent.Pressed, function () {
@@ -1367,7 +1373,7 @@ controller.right.onEvent(ControllerButtonEvent.Pressed, function () {
             updateMenuDisplay();
         }
     } else if (gameState == GameState.Playing) {
-        if (cursorCol < 7) {
+        if (cursorCol < BOARD_SIZE - 1) {
             cursorCol++;
             updateCursorSprite();
         }
@@ -1400,11 +1406,36 @@ controller.down.onEvent(ControllerButtonEvent.Pressed, function () {
             menuSelection++;
             updateMenuDisplay();
         }
-    } else if (gameState == GameState.Playing && cursorRow < 7) {
+    } else if (gameState == GameState.Playing && cursorRow < BOARD_SIZE - 1) {
         cursorRow++;
         updateCursorSprite();
     }
 });
+
+function clearMoveHighlights() {
+    for (let highlight of moveHighlights) {
+        highlight.destroy();
+    }
+    moveHighlights = [];
+}
+
+function showMoveHighlights(row: number, col: number) {
+    clearMoveHighlights();
+    let piece = board[row][col];
+    if (!piece) return;
+    for (let r = 0; r < BOARD_SIZE; r++) {
+        for (let c = 0; c < BOARD_SIZE; c++) {
+            if (isLegalMove(row, col, r, c)) {
+                let highlight = sprites.create(image.create(SQUARE_SIZE, SQUARE_SIZE), SpriteKind.Hover);
+                highlight.image.drawRect(0, 0, SQUARE_SIZE, SQUARE_SIZE, 3);
+                highlight.setFlag(SpriteFlag.Ghost, true);
+                let pos = getCellPosition(r, c);
+                highlight.setPosition(pos.x, pos.y);
+                moveHighlights.push(highlight);
+            }
+        }
+    }
+}
 
 function newGame() {
     if (gameState == GameState.Playing) {
@@ -1413,26 +1444,41 @@ function newGame() {
         cursorRow = 0;
         cursorCol = 0;
         updateCursorSprite();
-        for (let r = 0; r < 8; r++) {
-            for (let c = 0; c < 8; c++) {
+        // Destroy all piece sprites from the previous game.
+        for (let r = 0; r < BOARD_SIZE; r++) {
+            for (let c = 0; c < BOARD_SIZE; c++) {
                 if (board[r][c] != null) {
                     board[r][c].sprite.destroy();
                 }
             }
         }
-        initBoard();
+        // Reset move history and scores.
+        moveHistory = [];
         whiteScore = 0;
         blackScore = 0;
+        // Also reset the captured pieces UI by destroying the status sprites.
+        if (leftStatusSprite) leftStatusSprite.destroy();
+        if (rightStatusSprite) rightStatusSprite.destroy();
+        initBoard();
+        createStatusUI();
         updateStatusUI();
         displayCustomText("New Game: White's turn");
     }
 }
 
 controller.menu.onEvent(ControllerButtonEvent.Pressed, function () {
-    newGame();
+    if (gameState == GameState.MainMenu && menuSelection == 1) {
+        aiSearchDepth = (aiSearchDepth < 5) ? aiSearchDepth + 1 : 2;
+        estimatedTotalNodes = aiSearchDepth * 1000;
+        updateMenuDisplay();
+        return;
+    }
+    if (gameState == GameState.GameOver || gameState == GameState.Playing) {
+        newGame();
+    }
 });
 
-// ==========================
-// === Initialization     ===
-// ==========================
+// ===========================
+// === Initialization      ===
+// ===========================
 createMainMenu();
