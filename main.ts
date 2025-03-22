@@ -908,8 +908,8 @@ function updateStatusUI() {
     // Left panel: White's score and captured Black pieces
     let leftImg = image.create(panelWidth, panelHeight);
     leftImg.fill(0);
-    leftImg.print("W", 4, 0, 1);
-    leftImg.print(whiteScore.toString(), 12, 0, 1);
+    leftImg.print("W", 0, 0, 1);
+    leftImg.print(whiteScore.toString(), 8, 0, 1);
     let leftYOffset = 16;
     for (let pType of allPieceTypes) {
         let count = whiteGroups[pType] || 0;
@@ -935,8 +935,8 @@ function updateStatusUI() {
     // Right panel: Black's score and captured White pieces
     let rightImg = image.create(panelWidth, panelHeight);
     rightImg.fill(0);
-    rightImg.print("B", 4, 0, 1);
-    rightImg.print(blackScore.toString(), 12, 0, 1);
+    rightImg.print("B", 0, 0, 1);
+    rightImg.print(blackScore.toString(), 8, 0, 1);
     let rightYOffset = 16;
     for (let pType of allPieceTypes) {
         let count = blackGroups[pType] || 0;
