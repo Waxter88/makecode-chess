@@ -1,5 +1,5 @@
 /**
- * Refactored Chess Game using Microsoft MakeCode Arcade
+ * Chess Game using Microsoft MakeCode Arcade
  *
  * Improvements:
  * - Caches cell positions for quick lookups.
@@ -27,7 +27,7 @@ const SQUARE_SIZE = 14;
 const BOARD_OFFSET_X = 24;
 const BOARD_OFFSET_Y = 4;
 const MAX_STACK = 2;      // Maximum stack for captured piece icons
-const YIELD_THRESHOLD = 15; // Yield in minimax every 15 nodes
+const YIELD_THRESHOLD = 25; // Yield in minimax
 
 // Z-index layers for sprite ordering
 const Z_BACKGROUND    = 0;
@@ -143,7 +143,6 @@ let gameOverMenuSprite: Sprite = null;
 
 // AI variables
 let aiThinking = false;
-// allow deeper search. (Adjust depth if needed.)
 let aiSearchDepth = 3;
 let nodesEvaluated = 0;
 let estimatedTotalNodes = 1000;
@@ -154,6 +153,7 @@ let whiteScore = 0;
 let blackScore = 0;
 
 // For status UI update optimization
+// (Note: removed early-return check to always update captured pieces.)
 let lastWhiteScore = -1;
 let lastBlackScore = -1;
 
@@ -187,7 +187,6 @@ namespace SpriteKind {
 // ===========================
 /** Returns the center position for a given board cell */
 function getCellPosition(row: number, col: number): { x: number, y: number } {
-    // Use precomputed positions for speed
     return cellPositions[row][col];
 }
 
@@ -361,7 +360,6 @@ function pieceValue(piece: Piece): number {
         case PieceType.Bishop: return 3;
         case PieceType.Rook: return 5;
         case PieceType.Queen: return 9;
-        // For evaluation, we give King a high value (though in practice its safety is evaluated separately)
         case PieceType.King: return 20;
         default: return 0;
     }
@@ -372,7 +370,6 @@ function pieceValue(piece: Piece): number {
 // ===========================
 
 // *** Improved AI: Piece–Square Tables for positional bonuses.
-// Values are from Black’s perspective; for White we flip the board.
 const pawnTable = [
     [  0,  0,  0,  0,  0,  0,  0,  0 ],
     [  5,  5,  5,  5,  5,  5,  5,  5 ],
@@ -466,7 +463,7 @@ function staticEvaluation(b: (Piece | null)[][]): number {
             let piece = b[r][c];
             if (piece) {
                 let base = pieceValue(piece);
-                let posBonus = getPieceSquareBonus(piece, r, c) / 10; // scale down table bonus
+                let posBonus = getPieceSquareBonus(piece, r, c) / 10;
                 if (piece.color == PieceColor.Black) {
                     score += base + posBonus;
                     if (piece.type == PieceType.Bishop) blackBishops++;
@@ -477,10 +474,8 @@ function staticEvaluation(b: (Piece | null)[][]): number {
             }
         }
     }
-    // Bishop pair bonus
     if (whiteBishops >= 2) score -= 0.5;
     if (blackBishops >= 2) score += 0.5;
-    // King safety bonus: if the White king is in check, give Black a bonus (and vice versa)
     if (isKingInCheck(PieceColor.White, b)) score += 0.75;
     if (isKingInCheck(PieceColor.Black, b)) score -= 0.75;
     return score;
@@ -500,7 +495,7 @@ function createPiece(type: PieceType, color: PieceColor, row: number, col: numbe
 
 function drawBoardBackground() {
     let bg = image.create(160, 120);
-    bg.fill(6); // Background color
+    bg.fill(6);
     for (let row = 0; row < BOARD_SIZE; row++) {
         for (let col = 0; col < BOARD_SIZE; col++) {
             let x = BOARD_OFFSET_X + col * SQUARE_SIZE;
@@ -522,30 +517,24 @@ function initBoard() {
         board.push(rowArray);
     }
     enPassantTarget = null;
-    // Place Pawns
     for (let col = 0; col < BOARD_SIZE; col++) {
         board[1][col] = createPiece(PieceType.Pawn, PieceColor.Black, 1, col);
         board[6][col] = createPiece(PieceType.Pawn, PieceColor.White, 6, col);
     }
-    // Place Rooks
     board[0][0] = createPiece(PieceType.Rook, PieceColor.Black, 0, 0);
     board[0][7] = createPiece(PieceType.Rook, PieceColor.Black, 0, 7);
     board[7][0] = createPiece(PieceType.Rook, PieceColor.White, 7, 0);
     board[7][7] = createPiece(PieceType.Rook, PieceColor.White, 7, 7);
-    // Place Knights
     board[0][1] = createPiece(PieceType.Knight, PieceColor.Black, 0, 1);
     board[0][6] = createPiece(PieceType.Knight, PieceColor.Black, 0, 6);
     board[7][1] = createPiece(PieceType.Knight, PieceColor.White, 7, 1);
     board[7][6] = createPiece(PieceType.Knight, PieceColor.White, 7, 6);
-    // Place Bishops
     board[0][2] = createPiece(PieceType.Bishop, PieceColor.Black, 0, 2);
     board[0][5] = createPiece(PieceType.Bishop, PieceColor.Black, 0, 5);
     board[7][2] = createPiece(PieceType.Bishop, PieceColor.White, 7, 2);
     board[7][5] = createPiece(PieceType.Bishop, PieceColor.White, 7, 5);
-    // Place Queens
     board[0][3] = createPiece(PieceType.Queen, PieceColor.Black, 0, 3);
     board[7][3] = createPiece(PieceType.Queen, PieceColor.White, 7, 3);
-    // Place Kings
     board[0][4] = createPiece(PieceType.King, PieceColor.Black, 0, 4);
     board[7][4] = createPiece(PieceType.King, PieceColor.White, 7, 4);
 }
@@ -648,7 +637,6 @@ function isLegalMoveSimulated(fromRow: number, fromCol: number, toRow: number, t
     let simBoard = cloneBoard(board);
     let simPiece = simBoard[fromRow][fromCol];
     if (!simPiece) return false;
-    // Handle en passant capture
     if (simPiece.type == PieceType.Pawn && Math.abs(toCol - fromCol) == 1 && simBoard[toRow][toCol] == null) {
         simBoard[fromRow][toCol] = null;
     } else {
@@ -656,7 +644,6 @@ function isLegalMoveSimulated(fromRow: number, fromCol: number, toRow: number, t
     }
     simBoard[toRow][toCol] = simPiece;
     simBoard[fromRow][fromCol] = null;
-    // Handle castling simulation
     if (simPiece.type == PieceType.King && Math.abs(toCol - fromCol) == 2) {
         if (toCol > fromCol) {
             let rook = simBoard[fromRow][BOARD_SIZE - 1];
@@ -672,7 +659,6 @@ function isLegalMoveSimulated(fromRow: number, fromCol: number, toRow: number, t
 }
 
 function isLegalMoveBasic(fromRow: number, fromCol: number, toRow: number, toCol: number, piece: Piece): boolean {
-    // En passant special case
     if (piece.type == PieceType.Pawn && Math.abs(toCol - fromCol) == 1 &&
         toRow == fromRow + (piece.color == PieceColor.White ? -1 : 1)) {
         if (board[toRow][toCol] == null && enPassantTarget && enPassantTarget.row == toRow && enPassantTarget.col == toCol) {
@@ -692,7 +678,6 @@ function isLegalMoveBasic(fromRow: number, fromCol: number, toRow: number, toCol
             return isLegalQueenMove(fromRow, fromCol, toRow, toCol);
         case PieceType.King:
             if (Math.abs(toCol - fromCol) == 2 && toRow == fromRow) {
-                // Castling: ensure king is not in check and path is safe
                 if (isKingInCheck(piece.color, board)) return false;
                 let enemyColor = (piece.color == PieceColor.White) ? PieceColor.Black : PieceColor.White;
                 let step = toCol > fromCol ? 1 : -1;
@@ -733,16 +718,13 @@ function isLegalMove(fromRow: number, fromCol: number, toRow: number, toCol: num
 // ===========================
 function isLegalPawnMove(fromRow: number, fromCol: number, toRow: number, toCol: number, piece: Piece): boolean {
     let direction = piece.color == PieceColor.White ? -1 : 1;
-    // Single move forward
     if (toCol == fromCol && toRow == fromRow + direction && board[toRow][toCol] == null) {
         return true;
     }
-    // Double move from starting position
     if (toCol == fromCol && !piece.hasMoved && toRow == fromRow + 2 * direction &&
         board[fromRow + direction][fromCol] == null && board[toRow][toCol] == null) {
         return true;
     }
-    // Capturing move
     if (Math.abs(toCol - fromCol) == 1 && toRow == fromRow + direction) {
         if (board[toRow][toCol] != null && board[toRow][toCol].color != piece.color) {
             return true;
@@ -1039,12 +1021,10 @@ function createStatusUI() {
     rightStatusSprite.setPosition(150, BOARD_OFFSET_Y + 6);
 }
 
+// *** FIXED updateStatusUI: removed early-return so that pieces and scores update correctly.
 function updateStatusUI() {
-    // Only update if scores have changed
-    if (whiteScore === lastWhiteScore && blackScore === lastBlackScore) return;
     lastWhiteScore = whiteScore;
     lastBlackScore = blackScore;
-    // Group captured pieces by type
     function groupByType(pieces: PieceType[]): { [pt: number]: number } {
         let groups: { [pt: number]: number } = {};
         for (let pt of pieces) {
@@ -1063,13 +1043,11 @@ function updateStatusUI() {
             }
         }
     }
-
     let whiteGroups = groupByType(capturedBlackPieces);
     let blackGroups = groupByType(capturedWhitePieces);
     const panelWidth = 60, panelHeight = 80;
     let allPieceTypes = [PieceType.Pawn, PieceType.Rook, PieceType.Knight, PieceType.Bishop, PieceType.Queen, PieceType.King];
 
-    // Left panel: White's score and captured Black pieces
     let leftImg = image.create(panelWidth, panelHeight);
     leftImg.fill(0);
     leftImg.print("W", 0, 0, 1);
@@ -1095,7 +1073,6 @@ function updateStatusUI() {
     }
     leftStatusSprite.setImage(leftImg);
 
-    // Right panel: Black's score and captured White pieces
     let rightImg = image.create(panelWidth, panelHeight);
     rightImg.fill(0);
     rightImg.print("B", 0, 0, 1);
@@ -1268,8 +1245,6 @@ function createGameOverMenu(result: "win" | "lose" | "tie") {
 // ===========================
 // === AI Functions        ===
 // ===========================
-
-/* Helper: isLegalMove for board b */
 function isLegalMoveForBoard(b: (Piece | null)[][], fromRow: number, fromCol: number, toRow: number, toCol: number): boolean {
     let oldBoard = board;
     board = b;
@@ -1297,11 +1272,6 @@ function getAllLegalMoves(b: (Piece | null)[][], color: PieceColor): { fromRow: 
     return moves;
 }
 
-/* Improved minimax with:
-   - Move ordering (capturing moves prioritized)
-   - Quiescence search at leaf nodes
-   - Iterative deepening 
-*/
 function quiesce(b: (Piece | null)[][], alpha: number, beta: number, maximizingPlayer: boolean): number {
     nodesEvaluated++;
     yieldCounter++;
@@ -1358,7 +1328,6 @@ function minimax(b: (Piece | null)[][], depth: number, alpha: number, beta: numb
     }
     let color = maximizingPlayer ? PieceColor.Black : PieceColor.White;
     let moves = getAllLegalMoves(b, color);
-    // Move ordering: captures first
     moves.sort((m1, m2) => {
         let pieceA = b[m1.toRow][m1.toCol];
         let pieceB = b[m2.toRow][m2.toCol];
@@ -1404,7 +1373,6 @@ function minimax(b: (Piece | null)[][], depth: number, alpha: number, beta: numb
     }
 }
 
-// Note: simulateMove here does not handle castling or en passant.
 function simulateMove(b: (Piece | null)[][], fromRow: number, fromCol: number, toRow: number, toCol: number): void {
     let piece = b[fromRow][fromCol];
     if (!piece) return;
