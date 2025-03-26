@@ -27,7 +27,7 @@ const SQUARE_SIZE = 14;
 const BOARD_OFFSET_X = 24;
 const BOARD_OFFSET_Y = 4;
 const MAX_STACK = 2;      // Maximum stack for captured piece icons
-const YIELD_THRESHOLD = 25; // Yield in minimax
+const YIELD_THRESHOLD = 50; // Yield in minimax
 
 // Z-index layers for sprite ordering
 const Z_BACKGROUND    = 0;
